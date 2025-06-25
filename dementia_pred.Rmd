@@ -1,0 +1,272 @@
+---
+title: "VK-DWMR Final"
+output: html_document
+date: "2024-04-28"
+---
+
+```{r setup, include=FALSE}
+author <- "Vidushi Kataria"
+knitr::opts_chunk$set(echo = FALSE)
+
+library(dplyr)
+library(readr)
+library(tidyverse)
+library(ggplot2)
+library(Hmisc)
+library(PerformanceAnalytics)
+library(cowplot)
+library(caret)
+library(corrplot)
+library(rpart)
+library(rpart.plot)
+library(e1071)
+library(randomForest)
+library(gbm)
+library(Metrics)
+library(vtreat)
+library(AUC)
+```
+
+# Dementia Prediction
+
+## Introduction
+Dementia refers to a range of cognitive declines that hinder daily functioning, with memory loss being a common example. Rather than a single disease, it encompasses various symptoms that affect memory and thinking skills, ultimately impacting a person's ability to carry out everyday activities. As a Cognitive Science major specializing in Neuroscience, I find it fitting to do an analysis on Dementia, since it has been fascinating the world of neuroscience to this day. In this project, I aim to identify key features associated with dementia onset and progression, ultimately constructing a robust predictive model capable of accurately classifying individuals at risk of developing dementia.
+
+## Understanding the Data
+For the data, I used two publicly available datasets on OASIS (https://sites.wustl.edu/oasisbrains/):
+- oasis_cross-sectional.csv: Cross-sectional MRI Data in Young, Middle Aged, Nondemented and Demented Older Adults
+- oasis_longitudinal.csv: Longitudinal MRI Data in Young, Middle Aged, Nondemented and Demented Older Adults
+
+### What do variables stand for
+* **Subject.ID**
+* **MRI.ID**
+* **Group** *(Converted / Demented / Nondemented)*
+* **Visit** - Number of visits
+* **MR.Delay** ???
+
+### Demographics Info
+* **M.F** - Gender
+* **Hand** - Handedness *(actually all subjects were right-handed so I will drop this column)*
+* **Age**
+* **EDUC** - Years of education
+* **SES**  - Socioeconomic status as assessed by the Hollingshead Index of Social Position and classified into categories from *1 (highest status)* to *5 (lowest status)*
+
+### Clinical Info
+* **MMSE** - Mini-Mental State Examination score *(range is from 0 = worst to 30 = best) *
+* **CDR** - Clinical Dementia Rating *(0 = no dementia, 0.5 = very mild AD, 1 = mild AD, 2 = moderate AD)*
+
+#### Derived anatomic volumes
+* **eTIV** - Estimated total intracranial volume, mm3
+* **nWBV** - Normalized whole-brain volume, expressed as a percent of all voxels in the atlas-masked image that are labeled as gray or white matter by the automated tissue segmentation process
+* **ASF** - Atlas scaling factor (unitless). Computed scaling factor that transforms native-space brain and skull to the atlas target (i.e., the determinant of the transform matrix)
+
+### Interpretations
+Scores of 24 or higher out of 30 indicate normal cognition, while lower scores can suggest varying degrees of cognitive impairment: severe (≤9 points), moderate (10–18 points), or mild (19–23 points). Adjustment for education and age may be needed. Even a perfect score doesn't exclude dementia. Low scores often indicate dementia, but other mental disorders can also affect results. Physical issues like hearing or vision problems, or motor deficits, can interfere with interpretation if not properly noted.
+
+### Clinical Dementia Rating (CDR)
+The CDR™ in one aspect is a 5-point scale used to characterize six domains of cognitive and functional performance applicable to Alzheimer disease and related dementias: Memory, Orientation, Judgment & Problem Solving, Community Affairs, Home & Hobbies, and Personal Care. 
+This score is useful for characterizing and tracking a patient's level of impairment/dementia:
+* 0 = Normal
+* 0.5 = Very Mild Dementia
+* 1 = Mild Dementia
+* 2 = Moderate Dementia
+* 3 = Severe Dementia
+
+### Estimated total intracranial volume (eTIV)
+The ICV measure, sometimes referred to as total intracranial volume (TIV), refers to the estimated volume of the cranial cavity as outlined by the supratentorial dura matter or cerebral contour when dura is not clearly detectable. ICV, along with age and gender are reported as covariates to adjust for regression analyses in investigating progressive neurodegenerative brain disorders, such as Alzheimer's disease, aging and cognitive impairment. 
+
+I uploaded these files in the file pane on the right and read them as follows. 
+
+```{r data, echo=TRUE}
+data1 <- read.csv("oasis_longitudinal.csv")
+data2 <- read.csv("oasis_cross-sectional.csv")
+print(sample_n(data1, 5))
+print(sample_n(data2, 5))
+```
+
+## Data Manipulation
+In this section of code I wanted to clean the data by removing unnecessary columns (Hand and Delay), handle missing values, and create a new column Dementia based on the CDR variable.
+```{r manipulate, echo=FALSE}
+data1_clean <- data1 %>% 
+  select(-Hand) #drop Hand column since all patients are right-handed
+data1_clean$SES[is.na(data1_clean$SES)] <- median(data1_clean$SES, na.rm = TRUE)
+data1_clean$MMSE[is.na(data1_clean$MMSE)] <- median(data1_clean$MMSE, na.rm = TRUE)
+
+data2_clean <- data2 %>%
+  select(-Hand, -Delay) #drop Hand column since all patients are right-handed, and Delay since all values are N/A
+data2_clean$SES[is.na(data2_clean$SES)] <- median(data2_clean$SES, na.rm = TRUE)
+data2_clean$MMSE[is.na(data2_clean$MMSE)] <- median(data2_clean$SES, na.rm = TRUE)
+
+#Remove all N/A values
+data1_clean <- na.omit(data1_clean)
+data2_clean <- na.omit(data2_clean)
+
+#creating new column with Dementia diagnosis in data1_clean
+data1_clean$Dementia <- 0
+data1_clean$Dementia[data1_clean$CDR == 0] <- 0
+data1_clean$Dementia[data1_clean$CDR > 0] <- 1
+data1_clean$Dementia <- as.factor(data1_clean$Dementia)
+
+write.csv(data1_clean, file = "data1_clean.csv", row.names = FALSE)
+write.csv(data2_clean, file = "data2_clean.csv", row.names = FALSE)
+```
+
+## Exploratory Data Analysis
+In this section I wanted to include violin plots and jitter plots to visualize the distribution and relationships between variables such as age, gender, education level, socioeconomic status, MMSE score, whole-brain volume, and dementia diagnosis (CDR).
+The analysis aims to identify any potential associations or patterns that may help in understanding dementia indicators
+```{r violin, message=FALSE, warning=FALSE, paged.print=FALSE}
+data1_clean %>%
+    select(`Subject.ID`, `Age`, `CDR`, `M.F`) %>%
+    group_by(Subject.ID, CDR, M.F) %>%
+    summarise_all(funs(min)) %>%
+    as.data.frame() %>%
+    mutate(CDR = as.factor(CDR)) %>%
+  ggplot(aes(x = CDR, y = Age, fill = M.F)) + 
+    geom_violin() +
+    labs(title = "Distribution of Age by CDR rate",
+         fill = "Sex") +
+    theme_light() 
+```
+From this violin plot, there seems to be no obvious connection between Age/Sex and Dementia Diagnosis. Moving on...
+
+```{r Educ&SES, echo=FALSE}
+x_variable <- data1_clean %>%
+    select(EDUC, CDR, M.F) %>%
+    mutate(CDR = as.factor(CDR)) %>%
+ggplot(aes(x = CDR, y = EDUC)) + 
+    geom_jitter(aes(col = CDR), alpha = 0.6) +
+    labs(title = "x") +
+    theme_light()
+
+y_variable <- data2_clean %>%
+    select(SES, CDR, M.F) %>%
+    mutate(CDR = as.factor(CDR)) %>%
+ggplot(aes(x = CDR, y = SES)) + 
+    geom_jitter(aes(col = CDR), alpha = 0.6) +
+    labs(title = "x") +
+    theme_light()
+
+plot_educ_ses <- plot_grid(x_variable, y_variable) 
+title <- ggdraw() + draw_label("Distribution of Education and Social Economic Status", fontface='bold')
+plot_grid(title, plot_educ_ses, ncol=1, rel_heights=c(0.1, 1))
+
+print(plot_educ_ses)
+```
+From this jitter plot, there still seems to be no obvious connection between Education Level/Social Economic Status and Dementia Diagnosis. Sigh... we move on.
+
+```{r MMSE&Whole, echo=FALSE}
+x_variable2 <- data1_clean %>%
+    select(MMSE, CDR, M.F) %>%
+    mutate(CDR = as.factor(CDR)) %>%
+ggplot(aes(x = CDR, y = MMSE)) + 
+    geom_jitter(aes(col = CDR), alpha = 0.6) +
+    labs(title = "x") +
+    theme_light()
+
+y_variable2 <- data2_clean %>%
+    select(nWBV, CDR, M.F) %>%
+    mutate(CDR = as.factor(CDR)) %>%
+ggplot(aes(x = CDR, y = nWBV)) + 
+    geom_jitter(aes(col = CDR), alpha = 0.6) +
+    labs(title = "x") +
+    theme_light()
+
+plot_mmse_whole <- plot_grid(x_variable2, y_variable2) 
+title <- ggdraw() + draw_label("Distribution of MMSE Score and Whole-brain Volume", fontface='bold')
+plot_grid(title, plot_mmse_whole, ncol=1, rel_heights=c(0.1, 1))
+
+print(plot_mmse_whole)
+```
+While the MMS examination results of subjects not diagnosed with Dementia concentrate near 27-30 point rate, MMSE results of subjects diagnosed with Dementia seems to be more spread out. We can see that subjects had the highest MMSE score but still have Clinical Dementia Rating of 0.5 or 1. 
+
+
+```{r eTIV&ASF, echo=FALSE}
+x_variable3 <- data1_clean %>%
+    select(eTIV, CDR, M.F) %>%
+    mutate(CDR = as.factor(CDR)) %>%
+ggplot(aes(x = CDR, y = eTIV)) + 
+    geom_jitter(aes(col = CDR), alpha = 0.6) +
+    labs(title = "x") +
+    theme_light()
+
+y_variable3 <- data2_clean %>%
+    select(ASF, CDR, M.F) %>%
+    mutate(CDR = as.factor(CDR)) %>%
+ggplot(aes(x = CDR, y = ASF)) + 
+    geom_jitter(aes(col = CDR), alpha = 0.6) +
+    labs(title = "x") +
+    theme_light()
+
+plot_eTIV_ASF <- plot_grid(x_variable3, y_variable3) 
+title <- ggdraw() + draw_label("Distribution of Total Intracranial Volume and Atlas Scaling Factor", fontface='bold')
+plot_grid(title, plot_eTIV_ASF, ncol=1, rel_heights=c(0.1, 1))
+
+print(plot_eTIV_ASF)
+```
+Here, we cqn see that normalized whole-brain volume seems to have a bigger spread for subjects with CDR = 0 and narrows as CDR increases.
+
+## Preparing the data for GBM model
+```{r prepare, echo=FALSE}
+data1_new <- data1_clean %>%
+  select(M.F, Age, EDUC, SES, MMSE, eTIV, nWBV, ASF, CDR) %>%
+  mutate(CDR = as.factor(CDR))
+
+n_train <- round(0.8 * nrow(data1_new)) #80% of length of main data set as integer
+train_indices <- sample(1:nrow(data1_new), n_train) #creating a vector with random indices
+train <- data1_new[train_indices, ] #generating train data set (with ideces = train_indices)
+test <- data1_new[-train_indices, ] #generating test data set
+
+formula <- CDR ~ M.F + Age + EDUC + SES + MMSE + eTIV + nWBV
+k <- 5
+splitPlan <- kWayCrossValidation(nrow(data1_new), k, NULL, NULL) #generating 5-folds cross validation plan
+```
+
+### Gradient-Boosting Model
+I wanted to use the Gradient-Boosting Model because it predicts dementia diagnosis using the trained model on the test dataset and evaluates the model's performance using confusion matrix analysis and area under the ROC curve (AUC) calculation.
+The AUC value is computed to assess the model's predictive performance, with higher values indicating better prediction accuracy.
+```{r GBM, echo=FALSE}
+train$M.F <- factor(train$M.F)
+# Train a 5000-tree GBM model
+model_gbm <- gbm.fit(x = select(train, -CDR),
+                     y = train$CDR,
+                     distribution = "multinomial", 
+                     n.trees = 5000,
+                     shrinkage = 0.01,
+                     nTrain = round(nrow(train) * 0.8),
+                     verbose = FALSE)
+                 
+print(model_gbm)
+summary(model_gbm)
+
+prediction_gbm <- predict.gbm(object = model_gbm, 
+                              newdata = select(test, -CDR),
+                              type = "response",
+                              n.trees = gbm.perf(model_gbm, plot.it = FALSE))
+prediction_gbm <- apply(prediction_gbm, 1, which.max)
+
+levels(prediction_gbm)
+levels(test$CDR)
+prediction_gbm <- factor(prediction_gbm, levels = levels(test$CDR))
+
+confusionMatrix(data = prediction_gbm, reference = test$CDR)
+
+AUC_gbm <- Metrics::auc(actual = test$CDR, predicted = prediction_gbm)
+```
+
+**What is AUC?**
+
+AUC is an abbrevation for *area under the curve*. It is used in classification analysis in order to determine which of the used models predicts the classes best. The closer AUC for a model comes to 1, the better it is. So models with higher AUCs are preferred over those with lower AUCs.
+
+```{r comparison, message=FALSE, warning=FALSE}
+roc2 <- AUC::roc(prediction_gbm, test$CDR)
+
+print(paste0("AUC for GBM Model = ", round(AUC_gbm, 2)))
+```
+I wanted to use the gradient boosting machine learning model because I believe it is useful for dementia prediction. Here, I wanted to combine the strengths of ensemble learning, stage-wise training, flexible loss function optimization, and regularization to create accurate and robust predictive models. Therefore, it is well-suited for handling the complexities and challenges of medical datasets. 
+
+# Conclusion
+We can see that the GBM model gives us an accuracy of prediction about ~70%. We could also see that Clinical Dementia Rating higly depends of result of Mini-Mental State Examination, while Age, Educational Level and Social-Economic Status have not great influence. Although, it is important to remember that Dementia and Alzheimer’s desease is complex mental issue, so we can not fully rely on ML algorithms to make a diagnosis. However, it can help us interpret large amounts of medical data to find the overall bigger picture. 
+
+
+
+
